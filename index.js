@@ -11,7 +11,7 @@ import {
 } from "discord.js";
 import { joinVoiceChannel, getVoiceConnection } from "@discordjs/voice";
 import { textToSpeechStream } from "./lib/tts.js";
-import { generateReply } from "./lib/ai.js";
+import { generateReply, pickMood } from "./lib/ai.js";
 import { SpeechQueue, waitForConnectionReady } from "./lib/queue.js";
 
 const {
@@ -70,6 +70,10 @@ async function registerCommands() {
 
 client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
+  console.log(
+    `Config: model=${process.env.ELEVENLABS_MODEL_ID || "(unset, code default)"} ` +
+      `replyMode=${REPLY_MODE}`
+  );
   await registerCommands();
   console.log("Waiting for /join to be run in Discord.");
 });
@@ -155,8 +159,8 @@ async function handleLeave(interaction) {
 
 // Flavor lines spoken before reading each message, for a bit of character.
 const READ_INTROS = [
-  "[bored] Alright, let's see vhat this user says...",
-  "[sighing] Dracula rubs his temples...",
+  "Alright, let's see vhat this user says...",
+  "Dracula rubs his temples...",
 ];
 
 // Audio tags like [sighing] are for the voice model only; remove them
@@ -181,10 +185,15 @@ client.on("messageCreate", async (message) => {
   chatHistory.push({ author: authorName, content: message.content });
   while (chatHistory.length > Number(HISTORY_LENGTH)) chatHistory.shift();
 
-  // 1. Read the message aloud, prefixed with a flavor line and who said it
-  const readText = `${randomIntro()} ${authorName} says: ${message.content}`;
-  console.log(`[TTS] Reading: ${readText}`);
-  speechQueue.enqueue(() => textToSpeechStream(readText));
+  // 1. Read the message aloud. Claude picks Dracula's mood (as an audio tag)
+  // in parallel with whatever is already being spoken, so it adds little delay.
+  const intro = randomIntro();
+  const mood = pickMood(message.content); // never rejects; falls back to [angry]
+  speechQueue.enqueue(async () => {
+    const readText = `${await mood} ${intro} ${authorName} says: ${message.content}`;
+    console.log(`[TTS] Reading: ${readText}`);
+    return textToSpeechStream(readText);
+  });
 
   // 2. Decide whether the bot should also chime in with its own reply
   const wasMentioned = message.mentions.has(client.user);
