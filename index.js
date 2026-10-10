@@ -126,9 +126,15 @@ client.on("interactionCreate", async (interaction) => {
 
 // Flavor lines spoken before reading each message, for a bit of character.
 const READ_INTROS = [
-  "Alright, let's see vhat this user says...",
-  "Dracula rubs his temples...",
+  "[bored] Alright, let's see vhat this user says...",
+  "[sighing] Dracula rubs his temples...",
 ];
+
+// Audio tags like [sighing] are for the voice model only; remove them
+// from anything shown as text in Discord.
+function stripTags(text) {
+  return text.replace(/\[[^\]]*\]/g, "").replace(/\s{2,}/g, " ").trim();
+}
 
 function randomIntro() {
   return READ_INTROS[Math.floor(Math.random() * READ_INTROS.length)];
@@ -147,11 +153,9 @@ client.on("messageCreate", async (message) => {
   while (chatHistory.length > Number(HISTORY_LENGTH)) chatHistory.shift();
 
   // 1. Read the message aloud, prefixed with a flavor line and who said it
-  speechQueue.enqueue(() =>
-    textToSpeechStream(
-      `${randomIntro()} ${authorName} says: ${message.content}`
-    )
-  );
+  const readText = `${randomIntro()} ${authorName} says: ${message.content}`;
+  console.log(`[TTS] Reading: ${readText}`);
+  speechQueue.enqueue(() => textToSpeechStream(readText));
 
   // 2. Decide whether the bot should also chime in with its own reply
   const wasMentioned = message.mentions.has(client.user);
@@ -171,10 +175,13 @@ client.on("messageCreate", async (message) => {
     const reply = await generateReply(chatHistory);
     if (!reply) return;
 
-    chatHistory.push({ author: client.user.username, content: reply });
+    const visibleReply = stripTags(reply);
+
+    chatHistory.push({ author: client.user.username, content: visibleReply });
     while (chatHistory.length > Number(HISTORY_LENGTH)) chatHistory.shift();
 
-    await message.channel.send(reply);
+    await message.channel.send(visibleReply);
+    console.log(`[TTS] Reply: ${reply}`);
     speechQueue.enqueue(() => textToSpeechStream(reply));
   } catch (err) {
     console.error("Failed to generate/send AI reply:", err.message);
