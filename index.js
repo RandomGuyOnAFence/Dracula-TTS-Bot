@@ -1,7 +1,9 @@
 import "dotenv/config";
 import {
   Client,
+  Events,
   GatewayIntentBits,
+  MessageFlags,
   Partials,
   SlashCommandBuilder,
   REST,
@@ -66,7 +68,7 @@ async function registerCommands() {
   console.log("Slash commands registered.");
 }
 
-client.once("ready", async () => {
+client.once(Events.ClientReady, async () => {
   console.log(`Logged in as ${client.user.tag}`);
   await registerCommands();
   console.log("Waiting for /join to be run in Discord.");
@@ -75,54 +77,81 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  if (interaction.commandName === "join") {
-    const voiceChannel = interaction.member?.voice?.channel;
-    if (!voiceChannel) {
-      await interaction.reply({
-        content: "Join a voice channel first, then run /join.",
-        ephemeral: true,
-      });
-      return;
+  try {
+    if (interaction.commandName === "join") {
+      await handleJoin(interaction);
+    } else if (interaction.commandName === "leave") {
+      await handleLeave(interaction);
     }
-
-    const connection = joinVoiceChannel({
-      channelId: voiceChannel.id,
-      guildId: GUILD_ID,
-      adapterCreator: interaction.guild.voiceAdapterCreator,
-      selfDeaf: false,
-    });
-
-    try {
-      await waitForConnectionReady(connection);
-      speechQueue = new SpeechQueue(connection);
-      await interaction.reply(
-        `Joined **${voiceChannel.name}**. I'll read and respond to messages in <#${TEXT_CHANNEL_ID}>.`
-      );
-    } catch (err) {
-      console.error("Failed to join voice channel:", err.message);
-      await interaction.reply({
-        content: "Couldn't connect to that voice channel. Try again?",
-        ephemeral: true,
-      });
-    }
-    return;
-  }
-
-  if (interaction.commandName === "leave") {
-    const connection = getVoiceConnection(GUILD_ID);
-    if (connection) {
-      connection.destroy();
-      speechQueue = null;
-      await interaction.reply("Left the voice channel.");
-    } else {
-      await interaction.reply({
-        content: "I'm not in a voice channel.",
-        ephemeral: true,
-      });
-    }
-    return;
+  } catch (err) {
+    // Never let a failed command take the whole bot down.
+    console.error(`Error handling /${interaction.commandName}:`, err);
   }
 });
+
+async function handleJoin(interaction) {
+  const voiceChannel = interaction.member?.voice?.channel;
+  if (!voiceChannel) {
+    await interaction.reply({
+      content: "Join a voice channel first, then run /join.",
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  // Discord only allows 3 seconds to respond. Acknowledge right away,
+  // then take as long as we need to connect.
+  await interaction.deferReply();
+
+  // Drop any previous connection so we don't stack up duplicates.
+  getVoiceConnection(GUILD_ID)?.destroy();
+  speechQueue = null;
+
+  const connection = joinVoiceChannel({
+    channelId: voiceChannel.id,
+    guildId: GUILD_ID,
+    adapterCreator: interaction.guild.voiceAdapterCreator,
+    selfDeaf: false,
+  });
+
+  // Log every state change so connection problems are visible in Railway logs.
+  connection.on("stateChange", (oldState, newState) => {
+    console.log(`[voice] ${oldState.status} -> ${newState.status}`);
+  });
+  connection.on("error", (err) => {
+    console.error("[voice] connection error:", err);
+  });
+
+  try {
+    await waitForConnectionReady(connection);
+  } catch (err) {
+    console.error("Failed to join voice channel:", err.message);
+    connection.destroy();
+    await interaction.editReply(
+      "Couldn't connect to that voice channel. Check the Railway logs for [voice] lines."
+    );
+    return;
+  }
+
+  speechQueue = new SpeechQueue(connection);
+  await interaction.editReply(
+    `Joined **${voiceChannel.name}**. I'll read and respond to messages in <#${TEXT_CHANNEL_ID}>.`
+  );
+}
+
+async function handleLeave(interaction) {
+  const connection = getVoiceConnection(GUILD_ID);
+  if (connection) {
+    connection.destroy();
+    speechQueue = null;
+    await interaction.reply("Left the voice channel.");
+  } else {
+    await interaction.reply({
+      content: "I'm not in a voice channel.",
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}
 
 // Flavor lines spoken before reading each message, for a bit of character.
 const READ_INTROS = [
@@ -187,5 +216,10 @@ client.on("messageCreate", async (message) => {
     console.error("Failed to generate/send AI reply:", err.message);
   }
 });
+
+client.on("error", (err) => console.error("Client error:", err));
+process.on("unhandledRejection", (err) =>
+  console.error("Unhandled rejection:", err)
+);
 
 client.login(DISCORD_TOKEN);
